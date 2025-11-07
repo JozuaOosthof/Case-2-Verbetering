@@ -11,11 +11,22 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.diagnostic import het_breuschpagan
 from scipy import stats
 import warnings
+import re
+from collections import Counter
 import load_data
 
 warnings.filterwarnings('ignore')
 
 st.set_page_config('Statistische Analyse', layout='wide', page_icon='🔍')
+
+def make_label_map(columns):
+    pattern = re.compile(r'_\d+$')
+    raw = {col: pattern.sub('', col) for col in columns}
+    counts = Counter(raw.values())
+    return {col: (label if counts[label] == 1 else col) for col, label in raw.items()}
+
+def format_col(name, label_map):
+    return label_map.get(name, name)
 
 
 def prepare_dataframe(dataframe):
@@ -29,7 +40,7 @@ def prepare_dataframe(dataframe):
     return df_filtered
 
 
-def render_correlation_section(dataframe):
+def render_correlation_section(dataframe, label_map):
     st.write("#### Correlatie tussen Financiën, Leefstijl en Gezondheid")
     st.write("""
     Een correlatiematrix laat zien hoe sterk variabelen met elkaar samenhangen:
@@ -60,17 +71,19 @@ def render_correlation_section(dataframe):
             var_name='variable',
             value_name='correlation'
         )
+        corr_data['index_display'] = corr_data['index'].map(lambda x: format_col(x, label_map))
+        corr_data['variable_display'] = corr_data['variable'].map(lambda x: format_col(x, label_map))
         heatmap = alt.Chart(corr_data).mark_rect().encode(
-            x=alt.X('variable:N', title=None),
-            y=alt.Y('index:N', title=None),
+            x=alt.X('variable_display:N', title=None),
+            y=alt.Y('index_display:N', title=None),
             color=alt.Color(
                 'correlation:Q',
                 scale=alt.Scale(domain=[-1, 1], scheme='redblue'),
                 legend=alt.Legend(title="Correlatie")
             ),
             tooltip=[
-                alt.Tooltip('index:N', title='Variabele 1'),
-                alt.Tooltip('variable:N', title='Variabele 2'),
+                alt.Tooltip('index_display:N', title='Variabele 1'),
+                alt.Tooltip('variable_display:N', title='Variabele 2'),
                 alt.Tooltip('correlation:Q', title='Correlatie', format='.2f')
             ]
         ).properties(
@@ -79,8 +92,8 @@ def render_correlation_section(dataframe):
             title='Correlatiematrix'
         )
         text = alt.Chart(corr_data).mark_text(baseline='middle').encode(
-            x=alt.X('variable:N'),
-            y=alt.Y('index:N'),
+            x=alt.X('variable_display:N'),
+            y=alt.Y('index_display:N'),
             text=alt.Text('correlation:Q', format='.2f'),
             color=alt.condition(
                 'datum.correlation > 0.5 || datum.correlation < -0.5',
@@ -90,7 +103,22 @@ def render_correlation_section(dataframe):
         )
         st.altair_chart(heatmap + text, use_container_width=True)
         with st.expander("Toon correlatiematrix als tabel"):
-            st.dataframe(corr_matrix)
+            display_corr = corr_matrix.rename(
+                index=lambda x: format_col(x, label_map),
+                columns=lambda x: format_col(x, label_map)
+            )
+            st.dataframe(display_corr)
+        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+        top_links = (
+            upper.stack()
+            .rename("correlation")
+            .reindex(upper.stack().abs().sort_values(ascending=False).index)
+        )
+        if not top_links.empty:
+            st.markdown("**Sterkste verbanden**")
+            for (var1, var2), value in top_links.head(3).items():
+                direction = "positief" if value > 0 else "negatief"
+                st.write(f"- {format_col(var1, label_map)} ↔ {format_col(var2, label_map)}: {value:.2f} ({direction})")
 
 
 def render_transformation_options(y, histogram_data):
@@ -143,7 +171,7 @@ def render_transformation_options(y, histogram_data):
     return y
 
 
-def render_vif_table(X):
+def render_vif_table(X, label_map):
     st.write("#### Analyse van Multicollineariteit (VIF)")
     st.write("""
     De Variance Inflation Factor (VIF) helpt bij het identificeren van multicollineariteit tussen voorspellende variabelen:
@@ -154,20 +182,12 @@ def render_vif_table(X):
     """)
     X_with_const = sm.add_constant(X)
     vif_data = pd.DataFrame()
-    vif_data["Variabele"] = X_with_const.columns[1:]
+    vif_data["Variabele"] = [format_col(col, label_map) for col in X_with_const.columns[1:]]
     vif_data["VIF"] = [variance_inflation_factor(X_with_const.values, i) for i in range(1, X_with_const.shape[1])]
-    def vif_color(value):
-        if value < 1.5:
-            return 'lightgreen'
-        if value < 5:
-            return 'yellow'
-        return 'lightcoral'
-    def style_row(row):
-        return ['background-color: ' + vif_color(val) if idx == 1 else '' for idx, val in enumerate(row)]
-    st.dataframe(vif_data.style.apply(style_row, axis=1))
+    st.dataframe(vif_data)
 
 
-def render_feature_importance(final_model, X, y):
+def render_feature_importance(final_model, X, y, label_map):
     y_pred_full = final_model.predict(X)
     mse_full = mean_squared_error(y, y_pred_full)
     n_samples = X.shape[0]
@@ -186,6 +206,7 @@ def render_feature_importance(final_model, X, y):
         'P_waarde': p_values
     })
     feature_importance = feature_importance.iloc[np.abs(feature_importance['Coëfficiënt']).argsort()[::-1]].reset_index(drop=True)
+    feature_importance['Variabele'] = feature_importance['Variabele'].map(lambda x: format_col(x, label_map))
     importance_chart = alt.Chart(feature_importance).mark_bar().encode(
         x=alt.X('Coëfficiënt:Q', title='Coëfficiënt'),
         y=alt.Y('Variabele:N', sort=alt.EncodingSortField(field='Coëfficiënt', order='descending'), title=''),
@@ -213,24 +234,24 @@ def render_feature_importance(final_model, X, y):
             'Std_Error': '{:.3f}',
             'T_Stat': '{:.3f}',
             'P_waarde': '{:.3f}'
-        }).background_gradient(
-            subset=['P_waarde'],
-            cmap='RdYlGn_r',
-            vmin=0,
-            vmax=0.1
-        )
+        })
         st.dataframe(styled_stats)
     significant_features = feature_importance[feature_importance['P_waarde'] < 0.05]
     if significant_features.empty:
-        return
-    st.write("#### Significante Features (p < 0.05)")
-    st.write("De volgende variabelen hebben een statistisch significant effect op de ervaren gezondheid:")
-    for _, row in significant_features.iterrows():
-        effect = "positief" if row['Coëfficiënt'] > 0 else "negatief"
-        st.write(f"- **{row['Variabele']}**: {effect} effect (coëf. = {row['Coëfficiënt']:.3f}, p = {row['P_waarde']:.3f})")
+        st.info("Geen variabelen zijn statistisch significant bij p < 0.05.")
+    else:
+        st.write("#### Significante drivers (p < 0.05)")
+        summary_rows = []
+        for _, row in significant_features.iterrows():
+            effect = "Positief" if row['Coëfficiënt'] > 0 else "Negatief"
+            summary_rows.append(
+                f"- **{row['Variabele']}** → {effect.lower()} effect op ervaren gezondheid (coëff. {row['Coëfficiënt']:+.3f}, p = {row['P_waarde']:.3f})"
+            )
+        st.markdown("\n".join(summary_rows))
+    return feature_importance
 
 
-def render_residual_plots(y_test, y_pred, model_sk, X, y, df_reg, X_vars, residuals_model):
+def render_residual_plots(y_test, y_pred, model_sk, X, y, df_reg, X_vars, residuals_model, label_map):
     st.write(f"Intercept: {model_sk.intercept_:.3f}")
     st.write("#### Residuen Plot")
     st.write("Deze plot toont de residuen (de fouten van het model) ten opzichte van de voorspelde waarden. Een goed model laat een willekeurige spreiding van de punten rond de horizontale lijn op y=0 zien.")
@@ -339,10 +360,10 @@ def render_residual_plots(y_test, y_pred, model_sk, X, y, df_reg, X_vars, residu
     st.write("Hieronder zie je de data voor de twee datapunten met de grootste Cook's distance. Dit kan je helpen te bepalen of er datakwaliteitsproblemen zijn of dat het om uitzonderlijke, maar correcte, observaties gaat.")
     cooks_df['Original_Index'] = y.index.values
     influential_indices = cooks_df.sort_values(by='Cooks_Distance', ascending=False).head(4)['Original_Index'].tolist()
-    influential_points_data = df_reg.loc[influential_indices, X_vars + ['ervarengezondheid', 'Gemeente code (with prefix)', 'Provincie']]
-    cols = ['Gemeente code (with prefix)', 'Provincie'] + X_vars + ['ervarengezondheid']
-    influential_points_data = influential_points_data[cols]
-    st.dataframe(influential_points_data)
+    influence_cols = ['Gemeente code (with prefix)', 'Provincie'] + X_vars + ['ervarengezondheid']
+    influential_points_data = df_reg.loc[influential_indices, influence_cols]
+    display_cols = [format_col(col, label_map) for col in influence_cols]
+    st.dataframe(influential_points_data.set_axis(display_cols, axis=1))
     # Bereken gemiddelde van alle punten voor de gekozen variabelen
     average_values = df_reg[X_vars].mean().round(1).to_frame().T
     average_values.index = ['Gemiddelde']
@@ -352,13 +373,14 @@ def render_residual_plots(y_test, y_pred, model_sk, X, y, df_reg, X_vars, residu
     range_values.index = ['Bereik']
 
     comparison_df = pd.concat([influential_points_data[X_vars], range_values, average_values])
+    comparison_df = comparison_df.rename(columns={col: format_col(col, label_map) for col in comparison_df.columns})
 
     st.write("#### Vergelijking met het Gemiddelde")
     st.write("Om te zien of de invloedrijke datapunten uitschieters zijn, vergelijken we hun waarden met het gemiddelde van de dataset.")
     st.dataframe(comparison_df)
 
 
-def render_regression_section(dataframe):
+def render_regression_section(dataframe, label_map):
     st.write("#### Meervoudige Lineaire Regressie")
     st.write("Dit model voorspelt 'ervarengezondheid' op basis van financiële en leefstijl variabelen.")
     X_vars = [
@@ -403,10 +425,18 @@ def render_regression_section(dataframe):
     n = y_test.shape[0]
     p = X_test.shape[1]
     r2_adj = 1 - (1 - r2) * (n - 1) / (n - p - 1)
-    st.write(f"R-kwadraat (R²) score: {r2:.3f}")
-    st.write(f"Adjusted R-kwadraat (R² adj) score: {r2_adj:.3f}")
-    st.write(f"Mean Squared Error (MSE): {mean_squared_error(y_test, y_pred):.3f}")
-    st.write("#### Model Performance Samenvatting")
+    mse = mean_squared_error(y_test, y_pred)
+
+    st.write("#### Modelprestatie in één oogopslag")
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("R² (uitlegkracht)", f"{r2:.2f}")
+    with m2:
+        st.metric("R² adj.", f"{r2_adj:.2f}")
+    with m3:
+        st.metric("MSE", f"{mse:.3f}")
+    st.caption("Een R² van {:.0f}% betekent dat het model ongeveer {:.0f}% van de variantie in ervaren gezondheid verklaart.".format(r2*100, r2*100))
+
     model_sm = sm.OLS(y, sm.add_constant(X_selected)).fit()
     summary_data = {
         'R²': [model_sm.rsquared],
@@ -416,19 +446,56 @@ def render_regression_section(dataframe):
         'F p-waarde': np.array([model_sm.f_pvalue]).round(3)
 
     }
-    st.dataframe(pd.DataFrame(summary_data).T.rename(columns={0: 'Waarde'}), use_container_width=True)
-    render_vif_table(X_selected)
+    perf_df = pd.DataFrame(summary_data).T.rename(columns={0: 'Waarde'})
+    with st.expander("Volledige modelstatistieken"):
+        st.dataframe(perf_df.style.format({'Waarde': '{:.3f}'}), use_container_width=True)
+
+    with st.expander("Multicollineariteit (VIF)", expanded=False):
+        render_vif_table(X_selected, label_map)
+
     final_model = LinearRegression()
     final_model.fit(X_selected, y)
-    render_feature_importance(final_model, X_selected, y)
-    render_residual_plots(y_test, y_pred, model_sk, X_selected, y, df_reg, X_vars, model_sm)
+    feature_importance_df = render_feature_importance(final_model, X_selected, y, label_map)
+
+    sorted_features = feature_importance_df.assign(
+        Richting=np.where(feature_importance_df['Coëfficiënt'] >= 0, 'Positief', 'Negatief'),
+        Significant=np.where(feature_importance_df['P_waarde'] < 0.05, 'Ja', 'Nee')
+    ).sort_values(by='Coëfficiënt', key=lambda s: s.abs(), ascending=False)
+
+    top_positive = sorted_features[sorted_features['Coëfficiënt'] > 0].head(1)
+    top_negative = sorted_features[sorted_features['Coëfficiënt'] < 0].head(1)
+    summary_lines = []
+    if not top_positive.empty:
+        row = top_positive.iloc[0]
+        summary_lines.append(f"• **{row['Variabele']}**: sterk positief effect (+{row['Coëfficiënt']:.2f}) op ervaren gezondheid.")
+    if not top_negative.empty:
+        row = top_negative.iloc[0]
+        summary_lines.append(f"• **{row['Variabele']}**: sterk negatief effect ({row['Coëfficiënt']:.2f}) op ervaren gezondheid.")
+    if summary_lines:
+        st.success("Belangrijkste drivers\n" + "\n".join(summary_lines))
+
+    drivers_view = sorted_features[['Variabele', 'Coëfficiënt', 'P_waarde', 'Richting', 'Significant']].head(8)
+    st.write("#### Overzicht van belangrijkste variabelen")
+    st.dataframe(
+        drivers_view.style.format({'Coëfficiënt': '{:+.3f}', 'P_waarde': '{:.3f}'}),
+        use_container_width=True
+    )
+
+    with st.expander("Diagnostische checks (residuen, heteroscedasticiteit, QQ-plot, Cook's distance)", expanded=False):
+        render_residual_plots(y_test, y_pred, model_sk, X_selected, y, df_reg, X_vars, model_sm, label_map)
 
 
 def main():
     df_loaded, *_ = load_data.load_data()
+    label_map = make_label_map(df_loaded.columns)
     dataframe = prepare_dataframe(df_loaded)
     st.subheader('Statistische Analyse: Correlatie en Regressie')
+    st.markdown(
+        "We starten met een overzicht van de belangrijkste correlaties en bouwen vervolgens een regressiemodel dat verklaart "
+        "hoe financiële stress en mentale factoren samenhangen met ervaren gezondheid."
+    )
     with st.container(border=True):
-        render_correlation_section(dataframe)
-        render_regression_section(dataframe)
+        render_correlation_section(dataframe, label_map)
+    with st.container(border=True):
+        render_regression_section(dataframe, label_map)
 main()
